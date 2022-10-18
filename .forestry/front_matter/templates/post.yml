@@ -23,6 +23,8 @@ fields:
     use_select: true
     source:
       type: simple
+    options:
+    - cheatsheet
 - type: text
   name: author
   label: author
