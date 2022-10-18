@@ -8,6 +8,10 @@ fields:
 - type: datetime
   name: date
   label: date
+  hidden: true
+  config:
+    display_utc: true
+  default: now
 - type: list
   name: tags
   label: tags
