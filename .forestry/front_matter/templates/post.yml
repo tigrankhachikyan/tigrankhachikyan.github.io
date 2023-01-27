@@ -96,4 +96,5 @@ fields:
     name: hidden
     label: hidden
 pages:
+- content/posts/google-sheets-gviz-interface.md
 - content/posts/reverse-shel.md
