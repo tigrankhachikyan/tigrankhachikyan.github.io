@@ -1,6 +1,6 @@
 ---
 title: "PostgresQL Cheat Sheet: generate_series()"
-date: 2025-07-30T11:30:30Z
+date: 2025-07-29T11:30:30Z
 tags:
 - postgresql
 - sql
