@@ -1,5 +1,5 @@
 ---
-title: "PostgresQL Cheat Sheet: generate_series()"
+title: "PostgreSQL Cheat Sheet: generate_series()"
 date: 2025-07-29T11:30:30Z
 tags:
 - postgresql
