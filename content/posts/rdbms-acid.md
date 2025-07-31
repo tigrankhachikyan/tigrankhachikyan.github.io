@@ -262,74 +262,127 @@ COMMIT;  -- May raise serialization_failure error
 ## **D - Durability**
 
 **Technical Definition**:
-Durability guarantees that once a transaction commits, its effects persist permanently, surviving system failures, power outages, and crashes.
+Durability guarantees that once a transaction commits, its changes are permanently persisted and will survive any subsequent system failure, including crashes, power outages, or hardware failures.
 
-**Implementation Strategies**:
-- **Write-Ahead Logging (WAL)**: Log changes before applying them
-- **Force-write Policy**: Ensure log records reach stable storage before commit
-- **Checkpointing**: Periodically flush dirty pages to persistent storage
-- **Redundancy**: Replication and backup strategies
+**Core Durability Mechanisms**:
 
-### **SQLite vs PostgreSQL - Durability Mechanisms**
+**1. Write-Ahead Logging (WAL)**:
+- Transaction changes are logged to stable storage **before** being applied to data files
+- Ensures recoverability by maintaining a complete record of all modifications
+- Log records contain both old values (undo information) and new values (redo information)
 
-| Feature | SQLite | PostgreSQL |
-|---------|--------|------------|
-| **WAL Implementation** | Optional (DELETE/WAL/MEMORY modes) | Always enabled |
-| **Synchronization Control** | PRAGMA synchronous settings | fsync(), synchronous_commit |
-| **Crash Recovery** | Automatic journal/WAL replay | WAL replay with consistent recovery |
-| **Backup Methods** | File copy, .backup, online backup | pg_dump, pg_basebackup, continuous archiving |
-| **Point-in-Time Recovery** | Limited to WAL checkpoint | Full PITR with archived WAL |
+**2. Force-Write Policy**:
+- Log records must be physically written to disk before transaction commit
+- Uses synchronous I/O operations (fsync, fdatasync) to guarantee disk persistence
+- Creates ordering constraint: log-write → disk-sync → commit-response
 
-**SQLite Durability Configuration**:
+**3. Recovery Process**:
+- **Redo Phase**: Replay committed transactions from the log to restore changes
+- **Undo Phase**: Roll back uncommitted transactions found in the log
+- **Checkpointing**: Periodic background process that flushes dirty pages to reduce recovery time
+
+**4. Storage Layer Guarantees**:
+- Modern databases must handle write reordering by disk controllers and OS caches
+- Requires barrier/flush operations to ensure write ordering
+- Critical for maintaining log-before-data invariant
+
+### **SQLite vs PostgreSQL - Durability Implementation**
+
+| Aspect | SQLite | PostgreSQL |
+|--------|--------|------------|
+| **Logging Mechanism** | Rollback journal or WAL mode | Always WAL-based |
+| **Crash Recovery** | Automatic on next connection | Automatic on startup |
+| **Sync Granularity** | Database-level control | Per-transaction control |
+| **Recovery Time** | Fast (single file) | Variable (depends on WAL size) |
+| **Durability Modes** | 4 synchronous levels | Fine-grained commit control |
+
+**SQLite Durability Deep Dive**:
 ```sql
--- Configure durability parameters
-PRAGMA journal_mode = WAL;           -- Enable Write-Ahead Logging
-PRAGMA synchronous = FULL;           -- Force OS to sync to disk
-PRAGMA wal_autocheckpoint = 1000;    -- Checkpoint every 1000 pages
-PRAGMA cache_size = -64000;          -- 64MB cache
+-- SQLite's durability model
+PRAGMA journal_mode = WAL;        -- Enable Write-Ahead Logging
+PRAGMA synchronous = FULL;        -- Wait for OS to confirm disk write
 
--- Transaction with explicit sync
 BEGIN IMMEDIATE;
-INSERT INTO critical_data (timestamp, data) VALUES (datetime('now'), 'important');
-COMMIT;
--- Data is guaranteed on disk before COMMIT returns
+INSERT INTO orders (customer_id, amount) VALUES (123, 99.99);
+-- At this point:
+-- 1. Change is written to WAL file
+-- 2. WAL is synced to disk (synchronous=FULL)
+-- 3. Only then does COMMIT return
+COMMIT;  -- Durability guaranteed: change survives any crash after this point
 ```
 
-**PostgreSQL Durability Configuration**:
-```sql
--- postgresql.conf settings for durability
--- wal_level = replica                    -- Enable WAL for replication
--- fsync = on                            -- Force sync to disk
--- synchronous_commit = on               -- Wait for WAL sync before commit
--- wal_sync_method = fdatasync           -- Sync method
--- checkpoint_segments = 32              -- WAL segments between checkpoints
+**Key SQLite Durability Features**:
+- **Atomic Commit**: All changes in WAL are applied atomically during checkpoint
+- **Crash Recovery**: Uncompleted transactions automatically rolled back on next open
+- **WAL Persistence**: WAL file preserved until checkpoint ensures data file consistency
 
--- Transaction with durability control
+**PostgreSQL Durability Architecture**:
+```sql
+-- PostgreSQL's multi-layered durability
 BEGIN;
-INSERT INTO audit_log (user_id, action, timestamp) 
-VALUES (1001, 'login', CURRENT_TIMESTAMP);
+INSERT INTO financial_transactions (account_id, amount, type) 
+VALUES (12345, -500.00, 'withdrawal');
 
--- Force immediate WAL flush (optional)
-SELECT pg_wal_replay_pause();  -- For testing recovery scenarios
-
-COMMIT;  -- Guaranteed durable when this returns
+-- Before COMMIT returns:
+-- 1. Transaction record written to WAL buffer
+-- 2. WAL buffer flushed to WAL file on disk
+-- 3. fsync() ensures WAL is physically on disk
+-- 4. COMMIT response sent to client
+COMMIT;  -- Transaction is now durable
 ```
 
-**Advanced PostgreSQL Durability Features**:
+**PostgreSQL Durability Controls**:
 ```sql
--- Point-in-time recovery setup
-SELECT pg_start_backup('monthly_backup', true);
--- File system backup of data directory
-SELECT pg_stop_backup();
+-- Synchronous commit levels
+SET synchronous_commit = on;        -- Wait for WAL flush (default)
+SET synchronous_commit = off;       -- Async commit (faster, slight risk)
+SET synchronous_commit = local;     -- Wait for local WAL flush only
+SET synchronous_commit = remote_write; -- Wait for replica WAL write
 
--- Continuous archiving
--- archive_mode = on
--- archive_command = 'cp %p /archive_directory/%f'
-
--- Recovery to specific point
--- recovery_target_time = '2024-01-15 14:30:00'
--- recovery_target_inclusive = false
+-- Example of controlled durability
+BEGIN;
+-- Critical financial transaction
+SET LOCAL synchronous_commit = on;  -- Ensure absolute durability
+UPDATE accounts SET balance = balance - 1000 WHERE id = 123;
+COMMIT;  -- Will not return until WAL is synced to disk
 ```
+
+**Advanced Durability Scenarios**:
+
+**Crash Recovery Example**:
+```sql
+-- Scenario: System crashes during transaction
+BEGIN;
+INSERT INTO log_entries (message, timestamp) VALUES ('Process started', now());
+UPDATE counters SET value = value + 1 WHERE name = 'active_processes';
+-- ** SYSTEM CRASH OCCURS HERE **
+
+-- On restart, database automatically:
+-- 1. Scans WAL for uncommitted transactions
+-- 2. Rolls back the incomplete transaction
+-- 3. Database returns to consistent state before transaction began
+```
+
+**Durability vs Performance Trade-offs**:
+```sql
+-- High durability (slower)
+PRAGMA synchronous = FULL;     -- SQLite: Wait for complete disk sync
+SET synchronous_commit = on;   -- PostgreSQL: Wait for WAL sync
+
+-- Balanced approach (faster, still safe)
+PRAGMA synchronous = NORMAL;   -- SQLite: Sync at critical moments
+SET synchronous_commit = on;   -- PostgreSQL: Standard durability
+
+-- Performance optimized (risk of data loss)
+PRAGMA synchronous = OFF;      -- SQLite: Rely on OS for syncing
+SET synchronous_commit = off;  -- PostgreSQL: Async commit
+```
+
+**Key Technical Insights**:
+- **Storage Durability**: SSDs and modern storage controllers have internal caches that require explicit flush commands
+- **Battery-Backed Controllers**: Hardware RAID controllers with battery backup can safely cache writes
+- **Network Storage**: Durability guarantees must account for network partitions and storage system failures
+- **Replication**: True durability in production often requires synchronous replication to multiple nodes
 
 ## **Performance and Trade-offs Analysis**
 
