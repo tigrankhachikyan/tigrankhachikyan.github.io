@@ -1,6 +1,6 @@
 ---
 title: "PostgreSQL: GENERATED IDENTITY vs SERIAL Primary Keys - A Modern Developer's Guide"
-date: 2025-08-5T10:16:37Z
+date: 2025-08-05T10:16:37Z
 tags:
 - postgresql
 - sql
