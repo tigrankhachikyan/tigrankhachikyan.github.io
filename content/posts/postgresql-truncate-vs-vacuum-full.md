@@ -31,7 +31,6 @@ cover:
   hidden: true
 
 ---
-
 # PostgreSQL: Reclaiming Space - TRUNCATE vs VACUUM FULL
 
 ## The Problem
@@ -56,13 +55,106 @@ TRUNCATE TABLE table_name CASCADE;            -- Truncate related tables
 - ⚡ **Extremely fast** - doesn't scan the table
 - 🔒 **Requires ACCESS EXCLUSIVE lock** (blocks all operations)
 - 🗑️ **Data loss** - all rows are permanently deleted
-- 💾 **Immediate space reclaim** - disk space freed instantly
-- ⏮️ **Not MVCC-safe** - cannot be rolled back easily
+- 💾 **Immediate space reclaim** - disk space freed after commit
+- ⏮️ **Transactional** - can be rolled back within a transaction
+- 🔄 **MVCC-compliant** - uses file swapping mechanism
 
 **Use when:**
 - You don't need the data anymore
 - Clearing staging/temporary tables
 - Resetting test environments
+
+### How TRUNCATE Actually Works Under the Hood
+
+Unlike what you might expect, **TRUNCATE doesn't immediately delete data from disk**. Instead, it uses PostgreSQL's MVCC (Multi-Version Concurrency Control) system with a clever file-swapping mechanism:
+
+**Step 1: File Creation**
+```sql
+BEGIN;
+TRUNCATE table1;
+```
+
+When you run TRUNCATE:
+- PostgreSQL creates a **brand new, empty data file** with a new relfilenode (file identifier)
+- The old file containing all your data remains completely untouched on disk
+- Your transaction now points to the new empty file
+- Other concurrent sessions still point to the old file with all the data
+
+**On disk during uncommitted TRUNCATE:**
+```
+/data/base/16384/12345  <- Old file (still has all data, other sessions use this)
+/data/base/16384/12346  <- New empty file (your transaction uses this)
+```
+
+**Step 2: Transaction Visibility**
+
+Within your transaction, you immediately see an empty table:
+```sql
+BEGIN;
+TRUNCATE table1;
+SELECT * FROM table1;  -- Returns 0 rows (you see the new empty file)
+-- But other sessions still see all the original data!
+```
+
+Meanwhile, parallel sessions see the original data:
+```sql
+-- Different session/connection
+SELECT * FROM table1;  -- Still returns all rows from the old file
+```
+
+**This is how both versions coexist!** Your transaction references the new empty file, while other transactions reference the old full file. Both files exist on disk simultaneously.
+
+**Step 3: After COMMIT**
+```sql
+COMMIT;
+```
+
+- The system catalog permanently updates to point to the new empty file
+- The old data file is marked as "pending deletion"
+- Other transactions started after this point will see the empty table
+
+**Step 4: Cleanup Phase**
+
+The old file is physically deleted from disk only when:
+- No active transactions could possibly still need it
+- PostgreSQL confirms no one references it anymore
+- Cleanup happens via checkpoint process or during subsequent table modifications
+
+**You can see this file swapping in action:**
+```sql
+-- Check current file identifier
+SELECT relfilenode FROM pg_class WHERE relname = 'table1';
+-- Returns: 12345
+
+BEGIN;
+TRUNCATE table1;
+
+-- Check again (same session)
+SELECT relfilenode FROM pg_class WHERE relname = 'table1';
+-- Returns: 12346  (new file created!)
+
+ROLLBACK;  -- Or COMMIT
+
+-- After ROLLBACK: still 12345 (reverted to old file)
+-- After COMMIT: 12346 becomes permanent
+```
+
+**Why this design?**
+
+This file-swapping approach provides several critical benefits:
+
+1. **Instant rollback**: Just discard the new empty file and keep the old one
+2. **True MVCC compliance**: Other transactions see consistent data throughout
+3. **No blocking reads**: Concurrent SELECT queries continue uninterrupted until commit
+4. **Crash safety**: If PostgreSQL crashes, the old file is still intact
+5. **Speed**: Swapping file pointers is instant, regardless of table size
+
+**Contrast with DELETE:**
+- `DELETE FROM table1;` marks every row as deleted within the same file
+- Old row versions remain in the file taking up space
+- Requires VACUUM to reclaim space
+- Much slower for large tables (must scan every row)
+- `TRUNCATE` just swaps files - no row scanning needed
 
 ## VACUUM FULL: Slow but Safe
 
@@ -90,6 +182,16 @@ VACUUM FULL VERBOSE table_name;  -- Show progress
 - During maintenance windows
 - After large DELETE/UPDATE operations
 
+### How VACUUM FULL Works
+
+Unlike TRUNCATE's file swapping, VACUUM FULL:
+- Creates a new file and copies live rows into it (compacting them)
+- Rebuilds all indexes
+- Swaps to the new file after copying is complete
+- Deletes the old bloated file
+
+This explains why VACUUM FULL is much slower - it must read and copy every live row, while TRUNCATE just creates an empty file.
+
 ## Quick Comparison
 
 | Feature | TRUNCATE | VACUUM FULL |
@@ -97,8 +199,10 @@ VACUUM FULL VERBOSE table_name;  -- Show progress
 | **Speed** | Instant | Very slow |
 | **Data** | Deleted | Preserved |
 | **Lock** | ACCESS EXCLUSIVE | ACCESS EXCLUSIVE |
-| **Space freed** | Immediate | After completion |
+| **Mechanism** | File swapping | File rewrite + copy |
+| **Space freed** | After commit | After completion |
 | **Disk space needed** | None extra | 2x table size |
+| **Transactional** | Yes (can rollback) | No (can't rollback) |
 | **Use case** | Don't need data | Need data, remove bloat |
 
 ## Understanding ACCESS EXCLUSIVE Locks
@@ -155,18 +259,27 @@ SELECT pg_terminate_backend(pid);
 ## Important Notes
 
 ⚠️ **Lock duration matters:**
-- `TRUNCATE`: Lock held for milliseconds (very fast)
+- `TRUNCATE`: Lock held for milliseconds (file swap is instant)
 - `VACUUM FULL`: Lock held for minutes to hours (depends on table size)
+
+⚠️ **TRUNCATE is transactional:**
+```sql
+BEGIN;
+TRUNCATE TABLE my_table;
+-- You see empty table, others see old data
+ROLLBACK;  -- Data comes back!
+```
 
 ⚠️ **VACUUM FULL is rarely recommended** - consider alternatives:
 - Regular `VACUUM` (only SHARE UPDATE EXCLUSIVE lock - non-blocking)
 - `pg_repack` (online table rewrite, minimal locking)
 - Partitioning strategies
 
-⚠️ **TRUNCATE removes:**
-- All rows
-- Resets sequences (with RESTART IDENTITY)
-- Triggers TRUNCATE triggers (if defined)
+⚠️ **TRUNCATE also affects:**
+- All indexes (new empty index files created)
+- TOAST tables for large columns (new empty TOAST files)
+- Sequences (reset with RESTART IDENTITY)
+- TRUNCATE triggers (if defined)
 
 ## Best Practices
 
@@ -194,9 +307,20 @@ FROM pg_tables
 WHERE tablename = 'your_table';
 ```
 
+**Verify file swapping (educational):**
+```sql
+-- Before truncate
+SELECT relfilenode FROM pg_class WHERE relname = 'my_table';
+
+-- After truncate
+SELECT relfilenode FROM pg_class WHERE relname = 'my_table';
+-- Different number = new file was created!
+```
+
 ## TL;DR
 
-- **TRUNCATE** = Delete everything, get space back instantly (use for temp data)
-- **VACUUM FULL** = Keep data, remove bloat slowly (use during maintenance)
+- **TRUNCATE** = Creates new empty file, swaps pointer instantly, old file cleaned up later (use for temp data)
+- **VACUUM FULL** = Copies data to new compact file, slow but preserves data (use during maintenance)
 - **Both lock the table** - plan for downtime
+- **TRUNCATE is transactional** - happens within your session immediately, visible to others after COMMIT
 - **Consider alternatives** like `pg_repack` for production systems
