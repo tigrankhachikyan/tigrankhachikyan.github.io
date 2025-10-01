@@ -4,6 +4,8 @@ date: 2025-09-30T6:05:10Z
 tags:
 - postgresql
 - sql
+- truncate
+- "vacuum full"
 categories:
 - cheatsheet
 author: Me
