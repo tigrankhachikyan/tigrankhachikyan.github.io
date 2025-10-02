@@ -303,6 +303,368 @@ SELECT 16384::regclass;
 -- Result: users
 ```
 
+### 13. Find and Analyze TOAST Tables
+
+```sql
+-- Find TOAST tables for a specific table
+SELECT 
+    c.relname AS main_table,
+    t.relname AS toast_table,
+    pg_size_pretty(pg_relation_size(t.oid)) AS toast_size
+FROM pg_class c
+JOIN pg_class t ON t.oid = c.reltoastrelid
+WHERE c.relname = 'your_large_table';
+
+-- List all tables with their TOAST sizes
+SELECT 
+    c.relname AS table_name,
+    pg_size_pretty(pg_relation_size(c.oid)) AS table_size,
+    pg_size_pretty(pg_relation_size(c.reltoastrelid)) AS toast_size,
+    round(100.0 * pg_relation_size(c.reltoastrelid) / 
+          NULLIF(pg_total_relation_size(c.oid), 0), 2) AS toast_percentage
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.reltoastrelid > 0
+  AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+ORDER BY pg_relation_size(c.reltoastrelid) DESC;
+```
+
+### 14. Table Inheritance Hierarchies
+
+```sql
+-- Find all parent tables (tables with children)
+SELECT 
+    c.relname AS parent_table,
+    c.relhassubclass AS has_children
+FROM pg_class c
+WHERE c.relhassubclass = true
+  AND c.relkind = 'r';
+
+-- Get complete inheritance tree
+WITH RECURSIVE inheritance_tree AS (
+    -- Base case: top-level parents
+    SELECT 
+        c.oid,
+        c.relname,
+        0 AS level,
+        c.relname::text AS path
+    FROM pg_class c
+    WHERE c.relkind = 'r'
+      AND NOT EXISTS (
+          SELECT 1 FROM pg_inherits WHERE inhrelid = c.oid
+      )
+      AND c.relhassubclass = true
+    
+    UNION ALL
+    
+    -- Recursive case: children
+    SELECT 
+        child.oid,
+        child.relname,
+        parent.level + 1,
+        parent.path || ' -> ' || child.relname
+    FROM inheritance_tree parent
+    JOIN pg_inherits i ON parent.oid = i.inhparent
+    JOIN pg_class child ON i.inhrelid = child.oid
+)
+SELECT 
+    repeat('  ', level) || relname AS table_hierarchy,
+    level,
+    path
+FROM inheritance_tree
+ORDER BY path;
+
+-- Find all children of a specific parent table
+SELECT 
+    child.relname AS child_table,
+    parent.relname AS parent_table
+FROM pg_inherits i
+JOIN pg_class parent ON i.inhparent = parent.oid
+JOIN pg_class child ON i.inhrelid = child.oid
+WHERE parent.relname = 'parent_table_name';
+```
+
+### 15. Row-Level Security (RLS) Enabled Tables
+
+```sql
+-- Find all tables with RLS enabled
+SELECT 
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    c.relrowsecurity AS rls_enabled,
+    c.relforcerowsecurity AS rls_forced,
+    pg_catalog.obj_description(c.oid, 'pg_class') AS table_comment
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind = 'r'
+  AND c.relrowsecurity = true
+ORDER BY n.nspname, c.relname;
+
+-- Get RLS policies for tables with RLS
+SELECT 
+    schemaname,
+    tablename,
+    policyname,
+    permissive,
+    roles,
+    cmd,
+    qual,
+    with_check
+FROM pg_policies
+WHERE schemaname = 'public'
+ORDER BY tablename, policyname;
+```
+
+### 16. Replica Identity Settings
+
+```sql
+-- Check replica identity for all tables
+SELECT 
+    c.relname AS table_name,
+    CASE c.relreplident
+        WHEN 'd' THEN 'default (primary key)'
+        WHEN 'n' THEN 'nothing'
+        WHEN 'f' THEN 'full (all columns)'
+        WHEN 'i' THEN 'index'
+    END AS replica_identity,
+    c.relreplident AS identity_code
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+ORDER BY c.relname;
+
+-- Find tables with non-default replica identity
+SELECT 
+    c.relname AS table_name,
+    i.relname AS replica_index
+FROM pg_class c
+LEFT JOIN pg_index idx ON c.oid = idx.indrelid AND idx.indisreplident
+LEFT JOIN pg_class i ON idx.indexrelid = i.oid
+WHERE c.relkind = 'r'
+  AND c.relreplident != 'd'
+ORDER BY c.relname;
+```
+
+### 17. Storage Parameters (reloptions)
+
+```sql
+-- View all tables with custom storage parameters
+SELECT 
+    c.relname AS table_name,
+    c.reloptions AS storage_options
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.reloptions IS NOT NULL
+ORDER BY c.relname;
+
+-- Parse specific storage parameters
+SELECT 
+    c.relname AS table_name,
+    unnest(c.reloptions) AS option
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.reloptions IS NOT NULL;
+
+-- Find tables with specific fillfactor
+SELECT 
+    c.relname AS table_name,
+    (SELECT option_value 
+     FROM unnest(c.reloptions) AS option_value 
+     WHERE option_value LIKE 'fillfactor=%') AS fillfactor
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.reloptions::text LIKE '%fillfactor%';
+
+-- Common storage parameters to look for:
+-- fillfactor: percentage of page to fill (default 100)
+-- autovacuum_enabled: enable/disable autovacuum
+-- autovacuum_vacuum_threshold: min rows before vacuum
+-- autovacuum_vacuum_scale_factor: fraction of table size
+-- autovacuum_analyze_threshold: min rows before analyze
+-- toast.autovacuum_enabled: TOAST-specific autovacuum
+```
+
+### 18. Foreign Tables and Foreign Data Wrappers
+
+```sql
+-- List all foreign tables
+SELECT 
+    n.nspname AS schema_name,
+    c.relname AS foreign_table,
+    fs.srvname AS foreign_server,
+    fw.fdwname AS fdw_name
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_foreign_table ft ON c.oid = ft.ftrelid
+LEFT JOIN pg_foreign_server fs ON ft.ftserver = fs.oid
+LEFT JOIN pg_foreign_data_wrapper fw ON fs.srvfdw = fw.oid
+WHERE c.relkind = 'f'
+ORDER BY n.nspname, c.relname;
+
+-- Get foreign table options
+SELECT 
+    c.relname AS foreign_table,
+    ftoptions AS foreign_table_options
+FROM pg_class c
+JOIN pg_foreign_table ft ON c.oid = ft.ftrelid
+WHERE c.relkind = 'f';
+```
+
+### 19. Temporary Tables Analysis
+
+```sql
+-- Find all temporary tables in current session
+SELECT 
+    c.relname AS temp_table,
+    n.nspname AS temp_schema,
+    c.relpersistence,
+    pg_size_pretty(pg_relation_size(c.oid)) AS size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relpersistence = 't'
+  AND c.relkind = 'r'
+ORDER BY c.relname;
+
+-- Check for leftover temp tables from crashed sessions
+SELECT 
+    n.nspname AS schema_name,
+    COUNT(*) AS temp_table_count,
+    pg_size_pretty(SUM(pg_total_relation_size(c.oid))) AS total_size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE n.nspname LIKE 'pg_temp_%'
+GROUP BY n.nspname
+ORDER BY SUM(pg_total_relation_size(c.oid)) DESC;
+```
+
+### 20. System vs User Tables
+
+```sql
+-- Distinguish system catalogs from user tables
+SELECT 
+    CASE 
+        WHEN n.nspname = 'pg_catalog' THEN 'System Catalog'
+        WHEN n.nspname = 'information_schema' THEN 'Information Schema'
+        WHEN n.nspname LIKE 'pg_toast%' THEN 'TOAST'
+        WHEN n.nspname LIKE 'pg_temp%' THEN 'Temporary'
+        ELSE 'User Schema'
+    END AS table_category,
+    COUNT(*) AS table_count,
+    pg_size_pretty(SUM(pg_total_relation_size(c.oid))) AS total_size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind = 'r'
+GROUP BY table_category
+ORDER BY SUM(pg_total_relation_size(c.oid)) DESC;
+
+-- List only user tables (excluding system tables)
+SELECT 
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.relkind = 'r'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND n.nspname NOT LIKE 'pg_toast%'
+  AND n.nspname NOT LIKE 'pg_temp%'
+ORDER BY pg_total_relation_size(c.oid) DESC;
+```
+
+### 21. Unlogged Tables
+
+```sql
+-- Find all unlogged tables (faster but not WAL-logged)
+SELECT 
+    c.relname AS table_name,
+    c.relpersistence,
+    CASE c.relpersistence
+        WHEN 'p' THEN 'Permanent'
+        WHEN 'u' THEN 'Unlogged'
+        WHEN 't' THEN 'Temporary'
+    END AS persistence_type,
+    pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+FROM pg_class c
+WHERE c.relkind = 'r'
+  AND c.relpersistence = 'u'
+  AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+ORDER BY pg_total_relation_size(c.oid) DESC;
+```
+
+### 22. Table Access Method (Heap vs Others)
+
+```sql
+-- Check table access methods (PostgreSQL 12+)
+SELECT 
+    c.relname AS table_name,
+    am.amname AS access_method,
+    CASE am.amname
+        WHEN 'heap' THEN 'Standard row storage'
+        WHEN 'heap2' THEN 'Optimized heap'
+        ELSE 'Custom access method'
+    END AS description
+FROM pg_class c
+LEFT JOIN pg_am am ON c.relam = am.oid
+WHERE c.relkind = 'r'
+  AND c.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+ORDER BY c.relname;
+```
+
+---
+
+## Advanced Topics
+
+### TOAST (The Oversized-Attribute Storage Technique)
+
+**What is TOAST?**
+- PostgreSQL's mechanism for storing large column values (>2KB)
+- Automatically created for tables with potentially large columns
+- Lives in special `pg_toast` schema with naming pattern `pg_toast_<oid>`
+
+**Key Points:**
+- TOAST tables have `relkind = 't'`
+- Referenced by main table's `reltoastrelid` column
+- Stores compressed and/or out-of-line data
+- Has its own indexes (TOAST index)
+
+### Inheritance vs Partitioning
+
+**Table Inheritance (legacy):**
+- `relhassubclass = true` indicates parent tables
+- Children inherit columns from parents
+- Query parent to get data from all children
+- Manual constraint management
+
+**Declarative Partitioning (modern):**
+- `relkind = 'p'` for partitioned tables
+- `relispartition = true` for partition tables
+- Automatic constraint management
+- Better query planning
+
+### Storage Parameters Deep Dive
+
+Common `reloptions` values:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| fillfactor | 100 | Page fill percentage (lower = more HOT updates) |
+| autovacuum_enabled | on | Enable autovacuum for this table |
+| autovacuum_vacuum_threshold | 50 | Min rows before vacuum |
+| autovacuum_vacuum_scale_factor | 0.2 | Fraction of table to trigger vacuum |
+| autovacuum_analyze_threshold | 50 | Min rows before analyze |
+| autovacuum_analyze_scale_factor | 0.1 | Fraction to trigger analyze |
+| toast.autovacuum_enabled | on | Autovacuum for TOAST table |
+| parallel_workers | 0 | Number of parallel workers |
+
+### Replica Identity Explained
+
+Controls what information is logged for logical replication:
+
+- **d (default)**: Uses primary key (fails if no PK)
+- **n (nothing)**: No old row information logged
+- **f (full)**: Logs all columns (highest overhead)
+- **i (index)**: Uses specific unique index
+
 ---
 
 ## Performance Tips
