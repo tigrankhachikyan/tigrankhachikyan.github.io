@@ -2,11 +2,13 @@
 title: "SQLite Exclusion Constraints — The Practical Cheatsheet (with PostgreSQL Parallels)"
 date: 2025-12-17T6:05:10Z
 tags:
-- postgresql
 - sqlite
-- cloudflare d1
+- exclusion constraints
+- postgresql
 - sql
-- count
+- database design
+- constraints
+- cheatsheet
 categories:
 - cheatsheet
 author: Me
