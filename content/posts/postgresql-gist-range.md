@@ -1,6 +1,6 @@
 ---
 title: "Deep Dive: GiST Indexes and Time Range Exclusion Constraints in PostgreSQL"
-date: 2025-12-31T6:55:10Z
+date: 2025-12-30T6:55:10Z
 tags:
 - exclusion constraints
 - postgresql
