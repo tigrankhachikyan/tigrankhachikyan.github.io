@@ -1,10 +1,10 @@
 ---
 title: "PostgreSQL `tstzrange` Cheatsheet"
-date: 2025-08-01T05:30:30Z
+date: 2025-12-30T05:30:30Z
 tags:
 - postgresql
 - sql
-- update_from
+- tstzrange
 categories:
 - cheatsheet
 author: Me

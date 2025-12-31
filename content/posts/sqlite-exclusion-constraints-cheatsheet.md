@@ -1,6 +1,6 @@
 ---
 title: "SQLite Exclusion Constraints — The Practical Cheatsheet (with PostgreSQL Parallels)"
-date: 2025-12-17T6:05:10Z
+date: 2025-12-31T6:05:10Z
 tags:
 - sqlite
 - exclusion constraints
